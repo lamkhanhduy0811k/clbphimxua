@@ -19,7 +19,7 @@ const DEFAULT_POSTER = 'https://images.unsplash.com/photo-1536440136628-849c177e
 
 const MANIFEST = {
   id: 'org.clbphimxua.addon',
-  version: '3.0.0',
+  version: '4.0.0',
   name: 'CLB Phim Xưa',
   description: 'Kho Phim Lẻ, Phim Bộ & Hoạt Hình Xưa',
   resources: ['catalog', 'meta', 'stream'],
@@ -48,46 +48,58 @@ function cleanText(str) {
     .trim();
 }
 
+// Bóc tách link ảnh chuyên sâu bằng cách giải mã HTML mã hóa
 function findImageUrl(htmlContent) {
   if (!htmlContent) return DEFAULT_POSTER;
-  const imgRegex = /(https?:\/\/[^\s"'<>]+?\.(?:jpg|jpeg|png|webp))/gi;
-  const matches = htmlContent.match(imgRegex);
+  
+  const unescaped = htmlContent
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&amp;/g, '&');
 
-  if (matches && matches.length > 0) {
-    const wpImg = matches.find(m => m.includes('wp-content') || m.includes('uploads'));
-    return wpImg || matches[0];
+  const $ = cheerio.load(unescaped);
+  let img = $('img').first().attr('src') || $('img').first().attr('data-src') || $('img').first().attr('data-lazy-src');
+  
+  if (!img) {
+    const imgRegex = /(https?:\/\/[^\s"'<>]+?\.(?:jpg|jpeg|png|webp))/gi;
+    const matches = unescaped.match(imgRegex);
+    if (matches && matches.length > 0) {
+      const wpImg = matches.find(m => m.includes('wp-content') || m.includes('uploads'));
+      img = wpImg || matches[0];
+    }
   }
+
+  if (img) {
+    if (img.startsWith('//')) img = 'https:' + img;
+    return img;
+  }
+
   return DEFAULT_POSTER;
 }
 
-// Bộ nhớ đệm riêng cho từng danh mục
-const categoryCache = {};
+let cachedPosts = [];
+let lastFetchTime = 0;
 
-async function fetchFeedByCategory(catId) {
+async function fetchAllPosts() {
   const now = Date.now();
-  if (categoryCache[catId] && (now - categoryCache[catId].time < 300000)) {
-    return categoryCache[catId].data;
+  if (cachedPosts.length > 0 && (now - lastFetchTime < 300000)) {
+    return cachedPosts;
   }
 
-  // Đường dẫn RSS chính xác cho từng mục trên web gốc
-  let paths = [];
-  if (catId === 'clb_phimle') {
-    paths = ['/category/phim-le/feed/', '/category/phim-dien-anh/feed/'];
-  } else if (catId === 'clb_phimbo') {
-    paths = ['/category/phim-bo/feed/', '/category/phim-truyen-hinh/feed/'];
-  } else if (catId === 'clb_anime') {
-    paths = ['/category/hoat-hinh/feed/', '/category/anime/feed/'];
-  }
-  paths.push('/feed/'); // Mức dự phòng cuối cùng
+  const allItems = [];
+  const seenSlugs = new Set();
+  const pages = ['/feed/', '/feed/?paged=2', '/feed/?paged=3'];
 
-  for (const path of paths) {
-    const urls = [
-      `${DOMAIN}${path}`,
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(DOMAIN + path)}`,
-      `https://corsproxy.io/?${encodeURIComponent(DOMAIN + path)}`
+  for (const pagePath of pages) {
+    const feedUrls = [
+      `${DOMAIN}${pagePath}`,
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(DOMAIN + pagePath)}`,
+      `https://corsproxy.io/?${encodeURIComponent(DOMAIN + pagePath)}`
     ];
 
-    for (const url of urls) {
+    for (const url of feedUrls) {
       try {
         const res = await axios.get(url, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
@@ -96,7 +108,6 @@ async function fetchFeedByCategory(catId) {
 
         if (res.data && typeof res.data === 'string' && res.data.includes('<rss')) {
           const $ = cheerio.load(res.data, { xmlMode: true });
-          const items = [];
 
           $('item').each((i, el) => {
             const title = cleanText($(el).find('title').text());
@@ -107,48 +118,84 @@ async function fetchFeedByCategory(catId) {
             if (!content) content = $(el).find('description').text();
 
             const poster = findImageUrl(content);
-            
-            const $c = cheerio.load(content);
-            const iframes = [];
-            $c('iframe').each((idx, iframeEl) => {
-              let src = $c(iframeEl).attr('src') || $c(iframeEl).attr('data-src') || $c(iframeEl).attr('data-lazy-src');
-              if (src) {
-                if (src.startsWith('//')) src = 'https:' + src;
-                iframes.push(src);
-              }
-            });
 
             const slugParts = link.split('/').filter(Boolean);
             const slug = slugParts[slugParts.length - 1] || `post_${i}`;
 
-            items.push({
-              id: slug,
-              title,
-              link,
-              pubDate,
-              poster,
-              description: cleanText(content),
-              iframes
-            });
-          });
+            if (!seenSlugs.has(slug) && title) {
+              seenSlugs.add(slug);
 
-          if (items.length > 0) {
-            categoryCache[catId] = { data: items, time: now };
-            return items;
-          }
+              const $c = cheerio.load(content);
+              const iframes = [];
+              $c('iframe').each((idx, iframeEl) => {
+                let src = $c(iframeEl).attr('src') || $c(iframeEl).attr('data-src');
+                if (src) {
+                  if (src.startsWith('//')) src = 'https:' + src;
+                  iframes.push(src);
+                }
+              });
+
+              allItems.push({
+                id: slug,
+                title,
+                link,
+                pubDate,
+                poster,
+                description: cleanText(content),
+                iframes
+              });
+            }
+          });
+          break;
         }
       } catch (e) {}
     }
   }
 
-  return categoryCache[catId]?.data || [];
+  if (allItems.length > 0) {
+    cachedPosts = allItems;
+    lastFetchTime = now;
+  }
+
+  return cachedPosts;
 }
 
 app.get(['/catalog/:type/:id.json', '/catalog/:type/:id/:extra.json'], async (req, res) => {
   const { type, id } = req.params;
-  const posts = await fetchFeedByCategory(id);
+  const allPosts = await fetchAllPosts();
 
-  const metas = posts.map(post => ({
+  if (allPosts.length === 0) {
+    return res.json({ metas: [] });
+  }
+
+  // 1. Phim Hoạt Hình / Anime
+  const animePosts = allPosts.filter(p => 
+    /hoạt hình|anime|doraemon|conan|manga|mèo béo|hoạt họa|tiên kiếm/i.test(p.title + ' ' + p.description)
+  );
+
+  // Tập hợp còn lại sau khi trừ Hoạt hình
+  const nonAnimePosts = allPosts.filter(p => !animePosts.includes(p));
+
+  // 2. Phim Bộ
+  const phimBoPosts = nonAnimePosts.filter(p => 
+    p.iframes.length > 1 || /tập|bộ|lồng tiếng|thuyết minh|phần|trọn bộ|tvb|atv/i.test(p.title)
+  );
+
+  // 3. Phim Lẻ (Tập hợp còn lại trừ Phim Bộ)
+  const phimLePosts = nonAnimePosts.filter(p => !phimBoPosts.includes(p));
+
+  let selected = [];
+  const chunkSize = Math.max(1, Math.floor(allPosts.length / 3));
+
+  if (id === 'clb_anime') {
+    selected = animePosts.length > 0 ? animePosts : allPosts.slice(0, chunkSize);
+  } else if (id === 'clb_phimbo') {
+    selected = phimBoPosts.length > 0 ? phimBoPosts : allPosts.slice(chunkSize, chunkSize * 2);
+  } else {
+    selected = phimLePosts.length > 0 ? phimLePosts : allPosts.slice(chunkSize * 2);
+  }
+
+  const metas = selected.map(post => ({
     id: `clb:${post.id}`,
     type: type || 'movie',
     name: post.title || 'Phim Xưa',
@@ -165,18 +212,8 @@ app.get(['/meta/:type/:id.json', '/meta/:type/:id/:extra.json'], async (req, res
   const { id, type } = req.params;
   const slug = id.replace('clb:', '');
 
-  let posts = await fetchFeedByCategory('clb_phimbo');
-  let post = posts.find(p => p.id === slug);
-
-  if (!post) {
-    posts = await fetchFeedByCategory('clb_phimle');
-    post = posts.find(p => p.id === slug);
-  }
-
-  if (!post) {
-    posts = await fetchFeedByCategory('clb_anime');
-    post = posts.find(p => p.id === slug);
-  }
+  const allPosts = await fetchAllPosts();
+  const post = allPosts.find(p => p.id === slug) || allPosts[0];
 
   if (!post) return res.json({ meta: null });
 
@@ -205,18 +242,8 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
   const slug = parts[1];
   const idx = parseInt(parts[2] || '0', 10);
 
-  let posts = await fetchFeedByCategory('clb_phimbo');
-  let post = posts.find(p => p.id === slug);
-
-  if (!post) {
-    posts = await fetchFeedByCategory('clb_phimle');
-    post = posts.find(p => p.id === slug);
-  }
-
-  if (!post) {
-    posts = await fetchFeedByCategory('clb_anime');
-    post = posts.find(p => p.id === slug);
-  }
+  const allPosts = await fetchAllPosts();
+  const post = allPosts.find(p => p.id === slug);
 
   const targetUrl = post?.iframes[idx] || post?.iframes[0];
 
@@ -235,3 +262,4 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
 
 const PORT = process.env.PORT || 7000;
 app.listen(PORT, () => console.log(`CLB Phim Xua Addon running on port ${PORT}`));
+              
