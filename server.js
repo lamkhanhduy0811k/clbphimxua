@@ -18,9 +18,9 @@ const DOMAIN = 'https://clbphimxua.info';
 
 const MANIFEST = {
   id: 'org.clbphimxua.addon',
-  version: '1.4.0',
+  version: '1.5.0',
   name: 'CLB Phim Xưa',
-  description: 'Addon tổng hợp phim xưa kinh điển từ CLBPhimXua.info',
+  description: 'Addon lấy phim chuẩn 100% từ CLB Phim Xưa',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -33,44 +33,6 @@ const MANIFEST = {
 app.get('/', (req, res) => res.send('CLB Phim Xưa Addon Active'));
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Referer': 'https://clbphimxua.info/'
-};
-
-// Hàm tự động vượt rào chặn IP (Xoay vòng Proxy)
-async function fetchWP(endpointPath) {
-  const directUrl = `${DOMAIN}${endpointPath}`;
-  
-  // 1. Thử gọi trực tiếp
-  try {
-    const res = await axios.get(directUrl, { headers: HEADERS, timeout: 5000 });
-    if (res.data) return res.data;
-  } catch (e1) {
-    // 2. Nếu bị chặn IP, dùng Proxy 1 (corsproxy)
-    try {
-      const proxyUrl1 = `https://corsproxy.io/?${encodeURIComponent(directUrl)}`;
-      const res = await axios.get(proxyUrl1, { timeout: 7000 });
-      let data = res.data;
-      if (typeof data === 'string') data = JSON.parse(data);
-      if (data) return data;
-    } catch (e2) {
-      // 3. Dự phòng Proxy 2 (allorigins)
-      try {
-        const proxyUrl2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
-        const res = await axios.get(proxyUrl2, { timeout: 7000 });
-        let data = res.data;
-        if (typeof data === 'string') data = JSON.parse(data);
-        if (data) return data;
-      } catch (e3) {
-        console.error('All proxy attempts failed');
-      }
-    }
-  }
-  return null;
-}
-
 function cleanTitle(str) {
   if (!str) return '';
   return str
@@ -82,84 +44,103 @@ function cleanTitle(str) {
     .trim();
 }
 
+// Cào bài viết trực tiếp từ RSS Feed của clbphimxua.info
+async function getClbPosts() {
+  try {
+    const rssUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(DOMAIN + '/feed/')}`;
+    const res = await axios.get(rssUrl, { timeout: 8000 });
+    
+    if (res.data && res.data.status === 'ok' && Array.isArray(res.data.items)) {
+      return res.data.items.map(item => {
+        const content = item.content || item.description || '';
+        const $ = cheerio.load(content);
+        const poster = $('img').first().attr('src') || item.thumbnail || '';
+        
+        const iframes = [];
+        $('iframe').each((i, el) => {
+          let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src');
+          if (src) {
+            if (src.startsWith('//')) src = 'https:' + src;
+            iframes.push(src);
+          }
+        });
+
+        const slug = item.link.split('/').filter(Boolean).pop() || Math.random().toString(36).substring(7);
+
+        return {
+          id: slug,
+          title: cleanTitle(item.title),
+          poster: poster,
+          description: cleanTitle(item.description),
+          date: item.pubDate,
+          contentHtml: content,
+          iframes: iframes
+        };
+      });
+    }
+  } catch (e) {
+    console.error('Lỗi lấy RSS:', e.message);
+  }
+  return [];
+}
+
 app.get(['/catalog/:type/:id.json', '/catalog/:type/:id/:extra.json'], async (req, res) => {
   const { type } = req.params;
-  const extraParams = req.params.extra ? new URLSearchParams(req.params.extra) : new URLSearchParams();
-  const skip = parseInt(extraParams.get('skip') || '0', 10);
-  const page = Math.floor(skip / 20) + 1;
+  const posts = await getClbPosts();
 
-  const endpoint = `/wp-json/wp/v2/posts?per_page=20&page=${page}&_embed=1`;
-  const data = await fetchWP(endpoint);
-
-  if (Array.isArray(data) && data.length > 0) {
-    const metas = data.map(post => {
-      let poster = '';
-      if (post._embedded && post._embedded['wp:featuredmedia'] && post._embedded['wp:featuredmedia'][0]) {
-        poster = post._embedded['wp:featuredmedia'][0].source_url || '';
-      }
-      if (!poster && post.content && post.content.rendered) {
-        const $ = cheerio.load(post.content.rendered);
-        poster = $('img').first().attr('src') || '';
-      }
-
-      return {
-        id: `clb:${post.id}`,
-        type: type || 'movie',
-        name: cleanTitle(post.title?.rendered) || 'Phim Xưa',
-        poster: poster || 'https://via.placeholder.com/300x450?text=CLB+Phim+Xua',
-        background: poster,
-        description: cleanTitle(post.excerpt?.rendered) || '',
-        releaseInfo: new Date(post.date).getFullYear().toString()
-      };
-    });
-
-    return res.json({ metas });
+  if (posts.length === 0) {
+    return res.json({ metas: [] });
   }
 
-  return res.json({ metas: [] });
+  const metas = posts.map(post => ({
+    id: `clb:${post.id}`,
+    type: type || 'movie',
+    name: post.title || 'Phim Xưa',
+    poster: post.poster || 'https://via.placeholder.com/300x450?text=CLB+Phim+Xua',
+    background: post.poster,
+    description: post.description || '',
+    releaseInfo: post.date ? new Date(post.date).getFullYear().toString() : ''
+  }));
+
+  return res.json({ metas });
 });
 
 app.get(['/meta/:type/:id.json', '/meta/:type/:id/:extra.json'], async (req, res) => {
   const { id, type } = req.params;
-  const postId = id.replace('clb:', '');
+  const slug = id.replace('clb:', '');
+  const posts = await getClbPosts();
 
-  const endpoint = `/wp-json/wp/v2/posts/${postId}?_embed=1`;
-  const data = await fetchWP(endpoint);
+  const post = posts.find(p => p.id === slug) || posts[0];
 
-  if (!data) return res.json({ meta: null });
+  if (!post) return res.json({ meta: null });
 
-  const contentHtml = data.content?.rendered || '';
-  const $ = cheerio.load(contentHtml);
-
-  const iframes = [];
-  $('iframe').each((i, el) => {
-    let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src');
-    if (src) {
-      if (src.startsWith('//')) src = 'https:' + src;
-      iframes.push(src);
-    }
-  });
+  let iframes = post.iframes || [];
+  if (iframes.length === 0 && post.contentHtml) {
+    const $ = cheerio.load(post.contentHtml);
+    $('iframe').each((i, el) => {
+      let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src');
+      if (src) {
+        if (src.startsWith('//')) src = 'https:' + src;
+        iframes.push(src);
+      }
+    });
+  }
 
   const videos = iframes.map((iframeUrl, idx) => ({
-    id: `clb:${postId}:${idx}`,
+    id: `clb:${slug}:${idx}`,
     title: iframes.length > 1 ? `Tập ${idx + 1}` : 'Xem Phim',
     season: 1,
     episode: idx + 1
   }));
 
-  let poster = '';
-  if (data._embedded && data._embedded['wp:featuredmedia'] && data._embedded['wp:featuredmedia'][0]) {
-    poster = data._embedded['wp:featuredmedia'][0].source_url || '';
-  }
-
   return res.json({
     meta: {
-      id: `clb:${postId}`,
+      id: `clb:${slug}`,
       type: type || 'movie',
-      name: cleanTitle(data.title?.rendered) || 'Phim Xưa',
-      poster: poster,
-      description: cleanTitle(data.excerpt?.rendered || contentHtml),
-      videos: videos.length > 0 ? videos : [{ id: `clb:${postId}:0`, title: 'Xem Phim', season: 1, episode: 1 }]
+      name: post.title,
+      poster: post.poster,
+      description: post.description || post.title,
+      videos: videos.length > 0 ? videos : [{ id: `clb:${slug}:0`, title: 'Xem Phim', season: 1, episode: 1 }]
     }
   });
 });
@@ -167,25 +148,23 @@ app.get(['/meta/:type/:id.json', '/meta/:type/:id/:extra.json'], async (req, res
 app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req, res) => {
   const { id } = req.params;
   const parts = id.split(':');
-  const postId = parts[1];
+  const slug = parts[1];
   const idx = parseInt(parts[2] || '0', 10);
 
-  const endpoint = `/wp-json/wp/v2/posts/${postId}`;
-  const data = await fetchWP(endpoint);
+  const posts = await getClbPosts();
+  const post = posts.find(p => p.id === slug);
 
-  if (!data) return res.json({ streams: [] });
-
-  const contentHtml = data.content?.rendered || '';
-  const $ = cheerio.load(contentHtml);
-
-  const iframes = [];
-  $('iframe').each((i, el) => {
-    let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src');
-    if (src) {
-      if (src.startsWith('//')) src = 'https:' + src;
-      iframes.push(src);
-    }
-  });
+  let iframes = post?.iframes || [];
+  if (iframes.length === 0 && post?.contentHtml) {
+    const $ = cheerio.load(post.contentHtml);
+    $('iframe').each((i, el) => {
+      let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src');
+      if (src) {
+        if (src.startsWith('//')) src = 'https:' + src;
+        iframes.push(src);
+      }
+    });
+  }
 
   const targetUrl = iframes[idx] || iframes[0];
 
@@ -195,7 +174,7 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
     streams: [
       {
         name: '[CLB Phim Xưa]',
-        title: 'Trình phát VIP',
+        title: 'Trình phát VIP (Ok.ru / Embed)',
         externalUrl: targetUrl
       }
     ]
@@ -204,4 +183,4 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
 
 const PORT = process.env.PORT || 7000;
 app.listen(PORT, () => console.log(`CLB Phim Xua Addon running on port ${PORT}`));
-        
+    
