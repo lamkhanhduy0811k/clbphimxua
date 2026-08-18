@@ -19,7 +19,7 @@ const DEFAULT_POSTER = 'https://images.unsplash.com/photo-1536440136628-849c177e
 
 const MANIFEST = {
   id: 'org.clbphimxua.addon',
-  version: '2.1.0',
+  version: '2.2.0',
   name: 'CLB Phim Xưa',
   description: 'Kho Phim Lẻ, Phim Bộ & Hoạt Hình Xưa phân loại chuẩn 100%',
   resources: ['catalog', 'meta', 'stream'],
@@ -91,6 +91,12 @@ async function fetchAllPosts() {
           const link = $(el).find('link').text().trim();
           const pubDate = $(el).find('pubDate').text().trim();
           
+          // Trích xuất danh mục từ thẻ <category> của bài viết
+          const categories = [];
+          $(el).find('category').each((_, catEl) => {
+            categories.push($(catEl).text().trim().toLowerCase());
+          });
+
           let content = $(el).find('content\\:encoded').text();
           if (!content) content = $(el).find('description').text();
 
@@ -116,6 +122,7 @@ async function fetchAllPosts() {
             pubDate,
             poster,
             description: cleanText(content),
+            categories,
             iframes
           });
         });
@@ -142,33 +149,28 @@ app.get(['/catalog/:type/:id.json', '/catalog/:type/:id/:extra.json'], async (re
 
   let filtered = [];
 
-  // Phân loại riêng biệt 100% - KHÔNG TRÙNG LẶP
   if (id === 'clb_anime') {
-    // Chỉ lọc các phim Hoạt Hình / Anime
+    // Chỉ lấy phim có thẻ Hoạt Hình/Anime hoặc tiêu đề chứa từ khóa Hoạt Hình
     filtered = allPosts.filter(p => 
-      /hoạt hình|anime|doraemon|conan|manga|tây du|hoạt họa|mèo béo/i.test(p.title + ' ' + p.description)
+      p.categories.some(c => c.includes('hoạt hình') || c.includes('anime') || c.includes('hoat hinh')) ||
+      /hoạt hình|anime|doraemon|conan|manga|mèo béo|hoạt họa/i.test(p.title + ' ' + p.description)
     );
-    if (filtered.length < 2) {
-      filtered = allPosts.filter((_, idx) => idx % 3 === 0);
-    }
   } else if (id === 'clb_phimbo') {
-    // Phim Bộ
+    // Lấy Phim Bộ và loại bỏ hoàn toàn Anime
     filtered = allPosts.filter(p => 
-      p.iframes.length > 1 || /tập|bộ|lồng tiếng|thuyết minh|phần|trọn bộ/i.test(p.title)
+      p.categories.some(c => c.includes('phim bộ') || c.includes('phim bo') || c.includes('truyền hình')) ||
+      p.iframes.length > 1 || 
+      /tập|bộ|lồng tiếng|thuyết minh|phần|trọn bộ/i.test(p.title)
     );
-    if (filtered.length === 0) {
-      filtered = allPosts.filter((_, idx) => idx % 3 === 1);
-    }
+    filtered = filtered.filter(p => !p.categories.some(c => c.includes('hoạt hình') || c.includes('anime')));
   } else {
-    // Phim Lẻ: Loại trừ hoàn toàn Hoạt hình & Phim bộ
+    // Phim Lẻ: Loại bỏ Phim Bộ và Hoạt Hình
     filtered = allPosts.filter(p => 
-      p.iframes.length <= 1 && 
-      !/tập \d+|trọn bộ|phần \d+/i.test(p.title) &&
-      !/hoạt hình|anime|doraemon|conan|manga/i.test(p.title)
+      p.categories.some(c => c.includes('phim lẻ') || c.includes('phim le') || c.includes('điện ảnh')) ||
+      (p.iframes.length <= 1 && 
+       !/tập \d+|trọn bộ|phần \d+/i.test(p.title) &&
+       !p.categories.some(c => c.includes('phim bộ') || c.includes('hoạt hình') || c.includes('anime')))
     );
-    if (filtered.length === 0) {
-      filtered = allPosts.filter((_, idx) => idx % 3 === 2);
-    }
   }
 
   const metas = filtered.map(post => ({
@@ -229,12 +231,12 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
     streams: [
       {
         name: 'CLB Phim Xưa',
-        title: 'Server 1 - VIP Player',
+        title: 'Server 1 - VIP Player Embed',
         externalUrl: targetUrl
       },
       {
         name: 'CLB Phim Xưa',
-        title: 'Server 2 - Trình duyệt',
+        title: 'Server 2 - Trình duyệt ngoài',
         externalUrl: targetUrl
       }
     ]
@@ -243,3 +245,4 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
 
 const PORT = process.env.PORT || 7000;
 app.listen(PORT, () => console.log(`CLB Phim Xua Addon running on port ${PORT}`));
+              
