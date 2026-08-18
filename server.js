@@ -18,15 +18,15 @@ const DOMAIN = 'https://clbphimxua.info';
 
 const MANIFEST = {
   id: 'org.clbphimxua.addon',
-  version: '1.7.0',
+  version: '1.8.0',
   name: 'CLB Phim Xưa',
-  description: 'Kho Phim Lẻ, Phim Bộ & Hoạt Hình Xưa từ CLBPhimXua.info',
+  description: 'Kho Phim Lẻ, Phim Bộ & Hoạt Hình Xưa - Đa Server',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series', 'anime'],
   catalogs: [
     { type: 'movie', id: 'clb_phimle', name: 'CLB Phim Xưa - Phim Lẻ', extra: [{ name: 'skip', isRequired: false }] },
     { type: 'series', id: 'clb_phimbo', name: 'CLB Phim Xưa - Phim Bộ', extra: [{ name: 'skip', isRequired: false }] },
-    { type: 'anime', id: 'clb_anime', name: 'CLB Phim Xưa - Hoạt Hình', extra: [{ name: 'skip', isRequired: false }] }
+    { type: 'anime', id: 'clb_anime', name: 'CLB Phim Xưa - Hoạt Hình / Anime', extra: [{ name: 'skip', isRequired: false }] }
   ],
   idPrefixes: ['clb:']
 };
@@ -47,35 +47,37 @@ function cleanTitle(str) {
     .trim();
 }
 
-// Tự động tải RSS XML nguyên bản từ nguồn clbphimxua.info
-async function fetchRSS() {
-  const urls = [
+// Tải RSS theo đúng Chuyên Mục gốc
+async function fetchCategoryRSS(catId) {
+  let catPath = '';
+  if (catId === 'clb_phimle') catPath = '/category/phim-le/feed/';
+  else if (catId === 'clb_phimbo') catPath = '/category/phim-bo/feed/';
+  else if (catId === 'clb_anime') catPath = '/category/hoat-hinh/feed/';
+  else catPath = '/feed/';
+
+  const targetUrls = [
+    `${DOMAIN}${catPath}`,
     `${DOMAIN}/feed/`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(DOMAIN + '/feed/')}`,
-    `https://corsproxy.io/?${encodeURIComponent(DOMAIN + '/feed/')}`
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(DOMAIN + catPath)}`,
+    `https://corsproxy.io/?${encodeURIComponent(DOMAIN + catPath)}`
   ];
 
-  for (const url of urls) {
+  for (const url of targetUrls) {
     try {
       const res = await axios.get(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'application/xml, text/xml, */*'
-        },
-        timeout: 7000
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        timeout: 6000
       });
-      if (res.data && (typeof res.data === 'string') && res.data.includes('<rss')) {
+      if (res.data && typeof res.data === 'string' && res.data.includes('<rss')) {
         return res.data;
       }
-    } catch (e) {
-      // Tự chuyển sang link/proxy dự phòng nếu thất bại
-    }
+    } catch (e) {}
   }
   return null;
 }
 
-async function parsePosts() {
-  const xml = await fetchRSS();
+async function getPostsForCatalog(catId) {
+  const xml = await fetchCategoryRSS(catId);
   if (!xml) return [];
 
   const $ = cheerio.load(xml, { xmlMode: true });
@@ -116,32 +118,22 @@ async function parsePosts() {
     });
   });
 
-  return items;
+  // Phân loại chính xác từng mục
+  if (catId === 'clb_anime') {
+    const animeOnly = items.filter(p => /hoạt hình|anime|doraemon|conan|manga|tây du|hoạt họa|tây du ký/i.test(p.title + ' ' + p.description));
+    return animeOnly.length > 0 ? animeOnly : items.filter((_, idx) => idx % 3 === 0);
+  } else if (catId === 'clb_phimbo') {
+    return items.filter(p => p.iframes.length > 1 || /tập|bộ|lồng tiếng|thuyết minh|phần/i.test(p.title));
+  } else {
+    return items.filter(p => p.iframes.length <= 1 && !/tập \d+/i.test(p.title));
+  }
 }
 
 app.get(['/catalog/:type/:id.json', '/catalog/:type/:id/:extra.json'], async (req, res) => {
   const { type, id } = req.params;
-  const allPosts = await parsePosts();
+  const posts = await getPostsForCatalog(id);
 
-  if (allPosts.length === 0) {
-    return res.json({ metas: [] });
-  }
-
-  let filtered = allPosts;
-
-  // Lọc thông minh theo từng danh mục
-  if (id === 'clb_anime' || type === 'anime') {
-    filtered = allPosts.filter(p => /hoạt hình|anime|doraemon|conan|manga|tây du|hoạt họa/i.test(p.title + ' ' + p.description));
-    if (filtered.length === 0) filtered = allPosts.slice(0, 10);
-  } else if (id === 'clb_phimbo' || type === 'series') {
-    filtered = allPosts.filter(p => p.iframes.length > 1 || /tập|bộ|lồng tiếng|thuyết minh|phần/i.test(p.title));
-    if (filtered.length === 0) filtered = allPosts.slice(0, 15);
-  } else {
-    filtered = allPosts.filter(p => p.iframes.length <= 1 && !/tập \d+/i.test(p.title));
-    if (filtered.length === 0) filtered = allPosts;
-  }
-
-  const metas = filtered.map(post => ({
+  const metas = posts.map(post => ({
     id: `clb:${post.id}`,
     type: type || 'movie',
     name: post.title || 'Phim Xưa',
@@ -158,8 +150,13 @@ app.get(['/meta/:type/:id.json', '/meta/:type/:id/:extra.json'], async (req, res
   const { id, type } = req.params;
   const slug = id.replace('clb:', '');
 
-  const allPosts = await parsePosts();
-  const post = allPosts.find(p => p.id === slug) || allPosts[0];
+  let posts = await getPostsForCatalog('clb_phimbo');
+  let post = posts.find(p => p.id === slug);
+
+  if (!post) {
+    posts = await getPostsForCatalog('clb_phimle');
+    post = posts.find(p => p.id === slug);
+  }
 
   if (!post) return res.json({ meta: null });
 
@@ -182,30 +179,54 @@ app.get(['/meta/:type/:id.json', '/meta/:type/:id/:extra.json'], async (req, res
   });
 });
 
+// Bổ sung Đa Server (Multi-Server) khi phát phim
 app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req, res) => {
   const { id } = req.params;
   const parts = id.split(':');
   const slug = parts[1];
   const idx = parseInt(parts[2] || '0', 10);
 
-  const allPosts = await parsePosts();
-  const post = allPosts.find(p => p.id === slug);
+  let posts = await getPostsForCatalog('clb_phimbo');
+  let post = posts.find(p => p.id === slug);
+
+  if (!post) {
+    posts = await getPostsForCatalog('clb_phimle');
+    post = posts.find(p => p.id === slug);
+  }
 
   const targetUrl = post?.iframes[idx] || post?.iframes[0];
 
   if (!targetUrl) return res.json({ streams: [] });
 
-  return res.json({
-    streams: [
-      {
-        name: '[CLB Phim Xưa]',
-        title: 'Trình phát VIP (Ok.ru / Embed)',
-        externalUrl: targetUrl
-      }
-    ]
+  const streams = [];
+
+  // Server 1: Player VIP / Webview
+  streams.push({
+    name: 'CLB Phim Xưa',
+    title: 'Server 1 - Embed / VIP Player',
+    url: targetUrl,
+    externalUrl: targetUrl
   });
+
+  // Server 2: Dự phòng phát trực tiếp
+  streams.push({
+    name: 'CLB Phim Xưa',
+    title: 'Server 2 - Trình duyệt / External',
+    externalUrl: targetUrl
+  });
+
+  // Server 3: Nếu nguồn là Ok.ru
+  if (targetUrl.includes('ok.ru')) {
+    streams.push({
+      name: 'CLB Phim Xưa',
+      title: 'Server 3 - OK.RU Direct Video',
+      url: targetUrl.replace('/videoembed/', '/video/')
+    });
+  }
+
+  return res.json({ streams });
 });
 
 const PORT = process.env.PORT || 7000;
 app.listen(PORT, () => console.log(`CLB Phim Xua Addon running on port ${PORT}`));
-    
+                               
