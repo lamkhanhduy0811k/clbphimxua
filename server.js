@@ -6,7 +6,6 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-// Cấu hình CORS cho ứng dụng Nuvio / Stremio
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
@@ -19,9 +18,9 @@ const DOMAIN = 'https://clbphimxua.info';
 
 const MANIFEST = {
   id: 'org.clbphimxua.addon',
-  version: '1.2.0',
+  version: '1.3.0',
   name: 'CLB Phim Xưa',
-  description: 'Addon xem phim xưa, phim lồng tiếng kinh điển từ CLBPhimXua.info',
+  description: 'Addon tổng hợp phim xưa kinh điển',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -37,7 +36,6 @@ app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
   'Referer': 'https://clbphimxua.info/'
 };
 
@@ -52,7 +50,6 @@ function cleanTitle(str) {
     .trim();
 }
 
-// 1. Danh mục phim (Catalog)
 app.get(['/catalog/:type/:id.json', '/catalog/:type/:id/:extra.json'], async (req, res) => {
   const { type } = req.params;
   const extraParams = req.params.extra ? new URLSearchParams(req.params.extra) : new URLSearchParams();
@@ -61,48 +58,71 @@ app.get(['/catalog/:type/:id.json', '/catalog/:type/:id/:extra.json'], async (re
 
   try {
     const url = `${DOMAIN}/wp-json/wp/v2/posts?per_page=20&page=${page}&_embed=1`;
-    const response = await axios.get(url, { headers: HEADERS, timeout: 10000 });
+    const response = await axios.get(url, { headers: HEADERS, timeout: 6000 });
     const data = response.data;
 
-    if (!Array.isArray(data) || data.length === 0) {
-      return res.json({ metas: [] });
+    if (Array.isArray(data) && data.length > 0) {
+      const metas = data.map(post => {
+        let poster = '';
+        if (post._embedded && post._embedded['wp:featuredmedia'] && post._embedded['wp:featuredmedia'][0]) {
+          poster = post._embedded['wp:featuredmedia'][0].source_url || '';
+        }
+        if (!poster && post.content && post.content.rendered) {
+          const $ = cheerio.load(post.content.rendered);
+          poster = $('img').first().attr('src') || '';
+        }
+
+        return {
+          id: `clb:${post.id}`,
+          type: type || 'movie',
+          name: cleanTitle(post.title?.rendered) || 'Phim Xưa',
+          poster: poster || 'https://via.placeholder.com/300x450?text=CLB+Phim+Xua',
+          background: poster,
+          description: cleanTitle(post.excerpt?.rendered) || '',
+          releaseInfo: new Date(post.date).getFullYear().toString()
+        };
+      });
+
+      return res.json({ metas });
     }
-
-    const metas = data.map(post => {
-      let poster = '';
-      if (post._embedded && post._embedded['wp:featuredmedia'] && post._embedded['wp:featuredmedia'][0]) {
-        poster = post._embedded['wp:featuredmedia'][0].source_url || '';
-      }
-      if (!poster && post.content && post.content.rendered) {
-        const $ = cheerio.load(post.content.rendered);
-        poster = $('img').first().attr('src') || '';
-      }
-
-      return {
-        id: `clb:${post.id}`,
-        type: type || 'movie',
-        name: cleanTitle(post.title?.rendered) || 'Phim Xưa',
-        poster: poster,
-        background: poster,
-        description: cleanTitle(post.excerpt?.rendered) || '',
-        releaseInfo: new Date(post.date).getFullYear().toString()
-      };
-    });
-
-    return res.json({ metas });
   } catch (e) {
-    return res.json({ metas: [] });
+    console.error('Lỗi fetch:', e.message);
   }
+
+  // Dữ liệu mẫu đảm bảo Nuvio luôn hiện danh mục kể cả khi web gốc chặn IP
+  return res.json({
+    metas: [
+      {
+        id: 'clb:sample1',
+        type: type || 'movie',
+        name: 'CLB Phim Xưa - Đang kết nối server...',
+        poster: 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?q=80&w=400',
+        description: 'Đang tải dữ liệu từ kho phim xưa.'
+      }
+    ]
+  });
 });
 
-// 2. Chi tiết phim (Meta)
 app.get(['/meta/:type/:id.json', '/meta/:type/:id/:extra.json'], async (req, res) => {
   const { id, type } = req.params;
   const postId = id.replace('clb:', '');
 
+  if (postId === 'sample1') {
+    return res.json({
+      meta: {
+        id: id,
+        type: type || 'movie',
+        name: 'CLB Phim Xưa - Đang kết nối server...',
+        poster: 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?q=80&w=400',
+        description: 'Vui lòng kiểm tra lại kết nối mạng.',
+        videos: [{ id: `${id}:0`, title: 'Xem Phim', season: 1, episode: 1 }]
+      }
+    });
+  }
+
   try {
     const url = `${DOMAIN}/wp-json/wp/v2/posts/${postId}?_embed=1`;
-    const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000 });
+    const { data } = await axios.get(url, { headers: HEADERS, timeout: 6000 });
 
     if (!data) return res.json({ meta: null });
 
@@ -145,7 +165,6 @@ app.get(['/meta/:type/:id.json', '/meta/:type/:id/:extra.json'], async (req, res
   }
 });
 
-// 3. Luồng phát phim (Stream)
 app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req, res) => {
   const { id } = req.params;
   const parts = id.split(':');
@@ -154,7 +173,7 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
 
   try {
     const url = `${DOMAIN}/wp-json/wp/v2/posts/${postId}`;
-    const { data } = await axios.get(url, { headers: HEADERS, timeout: 10000 });
+    const { data } = await axios.get(url, { headers: HEADERS, timeout: 6000 });
 
     const contentHtml = data.content?.rendered || '';
     const $ = cheerio.load(contentHtml);
@@ -176,7 +195,7 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
       streams: [
         {
           name: '[CLB Phim Xưa]',
-          title: 'Trình phát Embed (Ok.ru)',
+          title: 'Trình phát VIP',
           externalUrl: targetUrl
         }
       ]
@@ -188,4 +207,4 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
 
 const PORT = process.env.PORT || 7000;
 app.listen(PORT, () => console.log(`CLB Phim Xua Addon running on port ${PORT}`));
-        
+    
