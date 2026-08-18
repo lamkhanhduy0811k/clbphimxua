@@ -18,14 +18,14 @@ const DOMAIN = 'https://clbphimxua.info';
 
 const MANIFEST = {
   id: 'org.clbphimxua.addon',
-  version: '1.0.0',
+  version: '1.1.0',
   name: 'CLB Phim Xưa',
-  description: 'Addon tổng hợp phim xưa, phim lồng tiếng kinh điển từ CLBPhimXua.info',
+  description: 'Addon tổng hợp phim xưa kinh điển từ CLBPhimXua.info',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
-    { type: 'movie', id: 'clb_phimle', name: 'CLB Phim Xưa - Phim Lẻ', extra: [{ name: 'skip', isRequired: false }] },
-    { type: 'series', id: 'clb_phimbo', name: 'CLB Phim Xưa - Phim Bộ', extra: [{ name: 'skip', isRequired: false }] }
+    { type: 'movie', id: 'clb_phimle', name: 'CLB Phim Xưa - Phim Lẻ' },
+    { type: 'series', id: 'clb_phimbo', name: 'CLB Phim Xưa - Phim Bộ' }
   ],
   idPrefixes: ['clb:']
 };
@@ -33,12 +33,10 @@ const MANIFEST = {
 app.get('/', (req, res) => res.send('CLB Phim Xưa Addon Active'));
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-const AXIOS_OPT = {
-  timeout: 10000,
-  headers: {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Referer': `${DOMAIN}/`
-  }
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Referer': `${DOMAIN}/`
 };
 
 function cleanTitle(str) {
@@ -57,9 +55,14 @@ app.get(['/catalog/:type/:id.json', '/catalog/:type/:id/:extra.json'], async (re
 
   try {
     const url = `${DOMAIN}/wp-json/wp/v2/posts?per_page=20&page=1&_embed=1`;
-    const { data } = await axios.get(url, AXIOS_OPT);
+    const response = await axios.get(url, { headers: HEADERS, timeout: 8000 });
+    const data = response.data;
 
-    const metas = (data || []).map(post => {
+    if (!Array.isArray(data) || data.length === 0) {
+      return res.json({ metas: [] });
+    }
+
+    const metas = data.map(post => {
       let poster = '';
       if (post._embedded && post._embedded['wp:featuredmedia'] && post._embedded['wp:featuredmedia'][0]) {
         poster = post._embedded['wp:featuredmedia'][0].source_url || '';
@@ -92,7 +95,7 @@ app.get(['/meta/:type/:id.json', '/meta/:type/:id/:extra.json'], async (req, res
 
   try {
     const url = `${DOMAIN}/wp-json/wp/v2/posts/${postId}?_embed=1`;
-    const { data } = await axios.get(url, AXIOS_OPT);
+    const { data } = await axios.get(url, { headers: HEADERS, timeout: 8000 });
 
     if (!data) return res.json({ meta: null });
 
@@ -103,7 +106,7 @@ app.get(['/meta/:type/:id.json', '/meta/:type/:id/:extra.json'], async (req, res
     $('iframe').each((i, el) => {
       let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src');
       if (src) {
-        if (src.startswith && src.startsWith('//')) src = 'https:' + src;
+        if (src.startsWith('//')) src = 'https:' + src;
         iframes.push(src);
       }
     });
@@ -143,7 +146,7 @@ app.get(['/stream/:type/:id.json', '/stream/:type/:id/:extra.json'], async (req,
 
   try {
     const url = `${DOMAIN}/wp-json/wp/v2/posts/${postId}`;
-    const { data } = await axios.get(url, AXIOS_OPT);
+    const { data } = await axios.get(url, { headers: HEADERS, timeout: 8000 });
 
     const contentHtml = data.content?.rendered || '';
     const $ = cheerio.load(contentHtml);
